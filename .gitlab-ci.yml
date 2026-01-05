@@ -1,0 +1,31 @@
+stages:
+  - build
+  - publish
+
+variables:
+  HELM_CHART_DIR: "fastmcp-http-oauth/helm/sentry-mcp"
+  HELM_PACKAGE_DIR: "dist"
+
+helm:package-and-publish:
+  stage: publish
+  image: alpine:3.19
+  tags:
+    - helm
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+  script:
+    - helm lint "$HELM_CHART_DIR"
+    - mkdir -p "$HELM_PACKAGE_DIR"
+    - helm package "$HELM_CHART_DIR" --destination "$HELM_PACKAGE_DIR"
+    - PACKAGE_FILE=$(find "$HELM_PACKAGE_DIR" -maxdepth 1 -type f -name '*.tgz' | head -n 1)
+    - |
+      if [ -z "$PACKAGE_FILE" ]; then
+        echo "No Helm package found in $HELM_PACKAGE_DIR" >&2
+        exit 1
+      fi
+    - PACKAGE_NAME=$(basename "$PACKAGE_FILE")
+    - HELM_CHANNEL=stable
+    - TARGET_URL="$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/helm/api/${HELM_CHANNEL}/charts"
+    - echo "Publishing $PACKAGE_NAME to $TARGET_URL"
+    - 'curl --fail-with-body --request POST --user "gitlab-ci-token:${CI_JOB_TOKEN}" --form "chart=@${PACKAGE_FILE}" "${TARGET_URL}"'
