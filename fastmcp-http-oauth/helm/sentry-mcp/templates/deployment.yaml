@@ -18,6 +18,9 @@ spec:
         {{- if not .Values.existingSecret }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
         {{- end }}
+        {{- if and .Values.customCAs.enabled (not .Values.customCAs.existingConfigMap) }}
+        checksum/custom-cas: {{ include (print $.Template.BasePath "/configmap-custom-cas.yaml") . | sha256sum }}
+        {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -79,6 +82,12 @@ spec:
             {{- toYaml .Values.readinessProbe | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.customCAs.enabled }}
+          volumeMounts:
+            - name: ssl-certs
+              mountPath: /etc/ssl/certs
+              readOnly: true
+          {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "sentry-mcp.configMapName" . }}
@@ -86,6 +95,11 @@ spec:
             {{- toYaml . | nindent 12 }}
             {{- end }}
           env:
+            {{- if .Values.customCAs.enabled }}
+            # Use custom CA certificates
+            - name: NODE_EXTRA_CA_CERTS
+              value: /etc/ssl/certs/ca-certificates.crt
+            {{- end }}
             # Secret values from Secret resource
             - name: SENTRY_CLIENT_SECRET
               valueFrom:

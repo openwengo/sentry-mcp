@@ -95,3 +95,14 @@ Get the Redis URL with optional authentication
 {{- .Values.config.redisUrl }}
 {{- end }}
 {{- end }}
+
+{{/*
+Get the name of the Custom CA ConfigMap to use
+*/}}
+{{- define "sentry-mcp.customCAConfigMapName" -}}
+{{- if .Values.customCAs.existingConfigMap }}
+{{- .Values.customCAs.existingConfigMap }}
+{{- else }}
+{{- include "sentry-mcp.fullname" . }}-custom-cas
+{{- end }}
+{{- end }}

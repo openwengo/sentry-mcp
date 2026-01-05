@@ -1,0 +1,89 @@
+# =============================================================================
+# docker-compose.production.yml - Self-contained production build
+# =============================================================================
+# Use this compose file for CI/CD and production deployments where you need
+# to build from source without pre-built artifacts.
+#
+# Usage:
+#   docker compose -f docker-compose.production.yml build
+#   docker compose -f docker-compose.production.yml up -d
+#
+# Or set COMPOSE_FILE environment variable:
+#   export COMPOSE_FILE=docker-compose.production.yml
+#   docker compose build && docker compose up -d
+# =============================================================================
+
+services:
+  # Sentry MCP Server (production build from source)
+  sentry-mcp:
+    build:
+      context: ..
+      dockerfile: fastmcp-http-oauth/Dockerfile.production
+      target: production
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      BASE_URL: "${BASE_URL:-http://localhost:3000}"
+
+      # Sentry OAuth configuration
+      SENTRY_HOST: "${SENTRY_HOST}"
+      SENTRY_CLIENT_ID: "${SENTRY_CLIENT_ID}"
+      SENTRY_CLIENT_SECRET: "${SENTRY_CLIENT_SECRET}"
+
+      # Redis/Valkey connection
+      REDIS_URL: "${REDIS_URL:-redis://valkey:6379}"
+      REDIS_TLS: "${REDIS_TLS:-false}"
+      REDIS_TLS_REJECT_UNAUTHORIZED: "${REDIS_TLS_REJECT_UNAUTHORIZED:-true}"
+
+      # Security keys (generate with: openssl rand -base64 32)
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY}"
+      JWT_SIGNING_KEY: "${JWT_SIGNING_KEY}"
+
+      # AI-Powered Tools (Optional)
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-}"
+
+      # Documentation Tools (Optional)
+      MCP_URL: "${MCP_URL:-https://mcp.sentry.dev}"
+
+      # Logging (set to "debug" for verbose output)
+      LOG_LEVEL: "${LOG_LEVEL:-}"
+    depends_on:
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Test runner service (production build with tests)
+  # Usage: docker compose -f docker-compose.production.yml run --rm test
+  test:
+    build:
+      context: ..
+      dockerfile: fastmcp-http-oauth/Dockerfile.production
+      target: test
+    profiles:
+      - test
+
+  # Valkey (Redis-compatible) for token storage
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - valkey_data:/data
+    command: ["valkey-server", "--save", "60", "1", "--loglevel", "warning"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  valkey_data:

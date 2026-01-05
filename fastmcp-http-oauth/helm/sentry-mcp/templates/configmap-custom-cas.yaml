@@ -1,0 +1,13 @@
+{{- if and .Values.customCAs.enabled (not .Values.customCAs.existingConfigMap) .Values.customCAs.certificates }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sentry-mcp.fullname" . }}-custom-cas
+  labels:
+    {{- include "sentry-mcp.labels" . | nindent 4 }}
+data:
+  {{- range $name, $content := .Values.customCAs.certificates }}
+  {{ $name }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

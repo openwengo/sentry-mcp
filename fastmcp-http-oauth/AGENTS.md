@@ -47,18 +47,20 @@ docker compose build --no-cache
 
 ```
 fastmcp-http-oauth/
-├── server.ts              # Main server entry point
-├── redis-token-storage.ts # TokenStorage implementation for Redis/Valkey
-├── docker-compose.yml     # Service definitions (sentry-mcp + valkey)
-├── Dockerfile             # Multi-stage build
-├── package.json           # Subproject-specific dependencies
-├── tsconfig.json          # TypeScript config
-├── .env.example           # Environment template
-├── .env                   # Local environment (gitignored)
-├── custom-cas/            # Custom CA certificates (for self-signed certs)
-├── __tests__/             # Unit tests
-└── helm/                  # Helm chart for Kubernetes deployment
-    └── sentry-mcp/        # Chart directory
+├── server.ts                    # Main server entry point
+├── redis-token-storage.ts       # TokenStorage implementation for Redis/Valkey
+├── docker-compose.yml           # Service definitions (dev, requires pre-built mcp-core)
+├── docker-compose.production.yml # Service definitions (production, self-contained)
+├── Dockerfile                   # Multi-stage build (dev)
+├── Dockerfile.production        # Multi-stage build (production, builds from source)
+├── package.json                 # Subproject-specific dependencies
+├── tsconfig.json                # TypeScript config
+├── .env.example                 # Environment template
+├── .env                         # Local environment (gitignored)
+├── custom-cas/                  # Custom CA certificates (for self-signed certs)
+├── __tests__/                   # Unit tests
+└── helm/                        # Helm chart for Kubernetes deployment
+    └── sentry-mcp/              # Chart directory
 ```
 
 ### How It Works
@@ -89,10 +91,36 @@ The server imports tools from `../packages/mcp-core/dist/`. The Dockerfile:
 
 ### Building
 
-```bash
-# Standard build (uses parent build context)
-docker compose build
+There are **two Dockerfiles** available:
 
+| Dockerfile | Use Case | Requires Pre-built mcp-core |
+|------------|----------|----------------------------|
+| `Dockerfile` | Local development | Yes (run `pnpm -w run build` first) |
+| `Dockerfile.production` | CI/CD & Production | No (builds everything from source) |
+
+#### Development Build (faster, requires pre-built mcp-core)
+
+```bash
+# First, build mcp-core in parent (one-time or after changes)
+cd .. && pnpm -w run build && cd fastmcp-http-oauth
+
+# Then build with development Dockerfile
+docker compose build
+```
+
+#### Production Build (self-contained, no pre-requisites)
+
+```bash
+# Build everything from source (no pre-built artifacts needed)
+docker compose -f docker-compose.production.yml build
+
+# Or build directly with Docker
+docker build -f Dockerfile.production -t sentry-mcp ..
+```
+
+#### Other Build Commands
+
+```bash
 # Force rebuild without cache
 docker compose build --no-cache
 
@@ -287,12 +315,15 @@ docker compose build --no-cache
 |------|---------|
 | `server.ts` | Main entry point, creates FastMCP server with OAuth |
 | `redis-token-storage.ts` | TokenStorage implementation for distributed deployments |
-| `docker-compose.yml` | Service orchestration (MCP server + Valkey) |
-| `Dockerfile` | Multi-stage build for production |
+| `docker-compose.yml` | Service orchestration (dev, requires pre-built mcp-core) |
+| `docker-compose.production.yml` | Service orchestration (production, self-contained build) |
+| `Dockerfile` | Multi-stage build for development |
+| `Dockerfile.production` | Multi-stage build for production (builds mcp-core from source) |
 | `package.json` | Dependencies (isolated from parent) |
 | `tsconfig.json` | TypeScript configuration |
 | `.env.example` | Environment variable template |
 | `custom-cas/` | Directory for custom CA certificates |
+| `helm/` | Helm chart for Kubernetes deployment |
 
 ## Security Considerations
 
@@ -396,8 +427,10 @@ helm install sentry-mcp ./helm/sentry-mcp \
 | `config.redisUrl` | Redis/Valkey URL | No (default: redis://valkey:6379) |
 | `existingSecret` | Name of existing K8s Secret | Recommended for prod |
 | `existingConfigMap` | Name of existing K8s ConfigMap | Optional |
-| `podDisruptionBudget.enabled` | Enable PDB | Yes (default: true) |
+| `podDisruptionBudget.enabled` | Enable PDB | No (default: false) |
 | `podDisruptionBudget.maxUnavailable` | Max unavailable pods | No (default: 1) |
+| `customCAs.enabled` | Enable custom CA certificates | No (default: false) |
+| `customCAs.existingConfigMap` | Name of existing ConfigMap with CAs | Optional |
 
 ### Required Secret Keys
 
@@ -418,6 +451,42 @@ podDisruptionBudget:
   # Or use minAvailable instead:
   # minAvailable: 1
 ```
+
+### Custom CA Certificates
+
+For connecting to internal services with self-signed or private CA certificates (e.g., self-hosted Sentry, internal Redis), use the `customCAs` feature:
+
+```bash
+# Option 1: Create ConfigMap from certificate files
+kubectl create configmap my-custom-cas \
+  --from-file=internal-ca.crt=/path/to/internal-ca.crt \
+  --from-file=another-ca.crt=/path/to/another-ca.crt
+
+# Install with existing CA ConfigMap
+helm install sentry-mcp ./helm/sentry-mcp \
+  --set customCAs.enabled=true \
+  --set customCAs.existingConfigMap=my-custom-cas \
+  --set existingSecret=my-sentry-mcp-secrets \
+  --set config.baseUrl=https://mcp.example.com \
+  --set config.sentryHost=sentry.internal.example.com
+```
+
+```bash
+# Option 2: Define certificates inline in values
+helm install sentry-mcp ./helm/sentry-mcp \
+  --set customCAs.enabled=true \
+  --set-file customCAs.certificates.internal-ca\\.crt=/path/to/internal-ca.crt \
+  --set existingSecret=my-sentry-mcp-secrets \
+  --set config.baseUrl=https://mcp.example.com
+```
+
+**How it works:**
+1. An init container runs `update-ca-certificates` with the custom CAs
+2. The generated certificates are stored in a shared `emptyDir` volume
+3. The main container mounts this volume at `/etc/ssl/certs`
+4. `NODE_EXTRA_CA_CERTS` is set to use the updated certificate bundle
+
+**Note:** The `custom-cas/` directory is gitignored and only used for local Docker development. For Kubernetes deployments, always use the Helm chart's `customCAs` feature.
 
 ### Upgrading
 
