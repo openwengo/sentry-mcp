@@ -34,6 +34,83 @@ import { setOpenAIBaseUrl } from "../packages/mcp-core/dist/internal/agents/open
 // Logging
 // ============================================================================
 
+const isDebug = () => process.env.LOG_LEVEL === "debug";
+
+/**
+ * Debug log helper - uses console.log to ensure visibility
+ * (console.debug is often filtered by containers/Node.js)
+ */
+function debugLog(prefix: string, ...args: unknown[]) {
+  if (isDebug()) {
+    const timestamp = new Date().toISOString();
+    console.log(`[${timestamp}] [DEBUG] [${prefix}]`, ...args);
+  }
+}
+
+/**
+ * Install a global fetch interceptor to log all HTTP requests in debug mode.
+ * This is essential for debugging OAuth flows since FastMCP handles them internally.
+ */
+function installFetchInterceptor() {
+  if (!isDebug()) return;
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+    const method = init?.method || "GET";
+
+    // Log request
+    debugLog("HTTP", `=> ${method} ${url}`);
+    if (init?.body && typeof init.body === "string") {
+      // Redact sensitive data
+      const body = init.body
+        .replace(/client_secret=[^&]+/g, "client_secret=***")
+        .replace(/code=[^&]+/g, "code=***")
+        .replace(/access_token=[^&]+/g, "access_token=***");
+      debugLog(
+        "HTTP",
+        `   Body: ${body.substring(0, 500)}${body.length > 500 ? "..." : ""}`,
+      );
+    }
+
+    const startTime = Date.now();
+    try {
+      const response = await originalFetch(input, init);
+      const duration = Date.now() - startTime;
+
+      // Log response
+      debugLog(
+        "HTTP",
+        `<= ${response.status} ${response.statusText} (${duration}ms)`,
+      );
+
+      // For error responses, try to log the body
+      if (!response.ok) {
+        const clonedResponse = response.clone();
+        try {
+          const errorBody = await clonedResponse.text();
+          debugLog("HTTP", `   Error body: ${errorBody.substring(0, 1000)}`);
+        } catch {
+          // Ignore if we can't read the body
+        }
+      }
+
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      debugLog("HTTP", `<= ERROR (${duration}ms):`, error);
+      throw error;
+    }
+  };
+
+  debugLog("HTTP", "Fetch interceptor installed");
+}
+
 /**
  * Custom logger that filters out noisy FastMCP warnings in stateless mode.
  * These warnings are expected when clients don't respond to capability queries.
@@ -46,9 +123,10 @@ const createLogger = () => {
 
   return {
     debug: (...args: unknown[]) => {
-      // Suppress debug logs in production (they're very noisy)
-      if (process.env.LOG_LEVEL === "debug") {
-        console.debug(...args);
+      // Use console.log instead of console.debug for visibility
+      if (isDebug()) {
+        const timestamp = new Date().toISOString();
+        console.log(`[${timestamp}] [DEBUG] [FastMCP]`, ...args);
       }
     },
     info: (...args: unknown[]) => {
@@ -62,19 +140,21 @@ const createLogger = () => {
       const message = args[0]?.toString() || "";
       if (FILTERED_WARNINGS.some((w) => message.includes(w))) {
         // Only log if debug level is enabled
-        if (process.env.LOG_LEVEL === "debug") {
-          console.debug("[filtered]", ...args);
+        if (isDebug()) {
+          const timestamp = new Date().toISOString();
+          console.log(`[${timestamp}] [DEBUG] [filtered]`, ...args);
         }
         return;
       }
       console.warn(...args);
     },
     error: (...args: unknown[]) => {
-      // Filter out known errors that are expected in stateless mode
+      // Always log errors, but add extra context in debug mode
       const message = args[0]?.toString() || "";
       if (FILTERED_WARNINGS.some((w) => message.includes(w))) {
-        if (process.env.LOG_LEVEL === "debug") {
-          console.debug("[filtered]", ...args);
+        if (isDebug()) {
+          const timestamp = new Date().toISOString();
+          console.log(`[${timestamp}] [DEBUG] [filtered-error]`, ...args);
         }
         return;
       }
@@ -294,6 +374,59 @@ async function createRedisClient(
 // Sentry OAuth Provider
 // ============================================================================
 
+/**
+ * Create a debugging wrapper around TokenStorage to log all operations
+ */
+function createDebugTokenStorage(storage: TokenStorage): TokenStorage {
+  return {
+    async get(key: string) {
+      debugLog("TokenStorage", `get(${key})`);
+      try {
+        const result = await storage.get(key);
+        debugLog(
+          "TokenStorage",
+          `get(${key}) =>`,
+          result ? "found" : "not found",
+        );
+        return result;
+      } catch (error) {
+        debugLog("TokenStorage", `get(${key}) ERROR:`, error);
+        throw error;
+      }
+    },
+    async save(key: string, value: unknown, ttl?: number) {
+      debugLog("TokenStorage", `save(${key}, ttl=${ttl})`);
+      try {
+        await storage.save(key, value, ttl);
+        debugLog("TokenStorage", `save(${key}) => success`);
+      } catch (error) {
+        debugLog("TokenStorage", `save(${key}) ERROR:`, error);
+        throw error;
+      }
+    },
+    async delete(key: string) {
+      debugLog("TokenStorage", `delete(${key})`);
+      try {
+        await storage.delete(key);
+        debugLog("TokenStorage", `delete(${key}) => success`);
+      } catch (error) {
+        debugLog("TokenStorage", `delete(${key}) ERROR:`, error);
+        throw error;
+      }
+    },
+    async cleanup() {
+      debugLog("TokenStorage", "cleanup()");
+      try {
+        await storage.cleanup();
+        debugLog("TokenStorage", "cleanup() => success");
+      } catch (error) {
+        debugLog("TokenStorage", "cleanup() ERROR:", error);
+        throw error;
+      }
+    },
+  };
+}
+
 function createSentryOAuthProxy(
   config: ServerConfig,
   tokenStorage: TokenStorage,
@@ -304,7 +437,24 @@ function createSentryOAuthProxy(
     config.encryptionKey,
   );
 
+  // In debug mode, wrap with logging
+  const finalStorage = isDebug()
+    ? createDebugTokenStorage(encryptedStorage)
+    : encryptedStorage;
+
   console.log(`   OAuth scopes: ${config.sentryScopes.join(", ")}`);
+
+  const authEndpoint = `https://${config.sentryHost}/oauth/authorize/`;
+  const tokenEndpoint = `https://${config.sentryHost}/oauth/token/`;
+
+  debugLog("OAuth", "Creating OAuthProxy with config:", {
+    baseUrl: config.baseUrl,
+    upstreamClientId: `${config.sentryClientId.substring(0, 8)}...`,
+    upstreamAuthorizationEndpoint: authEndpoint,
+    upstreamTokenEndpoint: tokenEndpoint,
+    scopes: config.sentryScopes,
+    allowedRedirectUriPatterns: config.allowedRedirectUriPatterns,
+  });
 
   return new OAuthProxy({
     // Base URL of this MCP server
@@ -313,14 +463,14 @@ function createSentryOAuthProxy(
     // Upstream Sentry OAuth endpoints
     upstreamClientId: config.sentryClientId,
     upstreamClientSecret: config.sentryClientSecret,
-    upstreamAuthorizationEndpoint: `https://${config.sentryHost}/oauth/authorize/`,
-    upstreamTokenEndpoint: `https://${config.sentryHost}/oauth/token/`,
+    upstreamAuthorizationEndpoint: authEndpoint,
+    upstreamTokenEndpoint: tokenEndpoint,
 
     // Scopes to request from Sentry (configurable via SENTRY_SCOPES env var)
     scopes: config.sentryScopes,
 
     // Token storage
-    tokenStorage: encryptedStorage,
+    tokenStorage: finalStorage,
 
     // JWT settings for token swap pattern
     enableTokenSwap: true,
@@ -466,18 +616,34 @@ async function createServer(config: ServerConfig) {
 
     // Authentication - extract session from JWT
     authenticate: async (request: AuthenticateRequest) => {
+      debugLog("Auth", "authenticate() called");
+
       const authHeader = request.headers.authorization;
       if (!authHeader?.startsWith("Bearer ")) {
+        debugLog("Auth", "Missing or invalid Authorization header");
         throw new Error("Missing or invalid Authorization header");
       }
 
       const token = authHeader.slice(7);
+      debugLog("Auth", `Token received (${token.length} chars)`);
 
       // Load upstream tokens from the FastMCP JWT
-      const upstreamTokens = await oauthProxy.loadUpstreamTokens(token);
+      debugLog("Auth", "Loading upstream tokens...");
+      let upstreamTokens: Awaited<
+        ReturnType<typeof oauthProxy.loadUpstreamTokens>
+      >;
+      try {
+        upstreamTokens = await oauthProxy.loadUpstreamTokens(token);
+      } catch (err) {
+        debugLog("Auth", "loadUpstreamTokens ERROR:", err);
+        throw err;
+      }
+
       if (!upstreamTokens) {
+        debugLog("Auth", "No upstream tokens found (invalid/expired)");
         throw new Error("Invalid or expired token");
       }
+      debugLog("Auth", "Upstream tokens loaded successfully");
 
       // Parse JWT claims for user info (basic decode, already verified by loadUpstreamTokens)
       let payload: { sub?: string; client_id?: string };
@@ -487,7 +653,12 @@ async function createServer(config: ServerConfig) {
           throw new Error("Token missing payload segment");
         }
         payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+        debugLog("Auth", "JWT payload parsed:", {
+          sub: payload.sub,
+          client_id: payload.client_id,
+        });
       } catch (err) {
+        debugLog("Auth", "JWT parse error:", err);
         throw new Error(
           `Failed to parse token payload: ${err instanceof Error ? err.message : "invalid format"}`,
         );
@@ -500,6 +671,11 @@ async function createServer(config: ServerConfig) {
         : typeof rawScope === "string"
           ? rawScope.split(" ").filter(Boolean)
           : [];
+
+      debugLog(
+        "Auth",
+        `Session created for user=${payload.sub}, scopes=${scopes.join(",")}`,
+      );
 
       return {
         accessToken: upstreamTokens.accessToken,
@@ -631,6 +807,10 @@ async function main() {
   console.log("🚀 Starting Sentry MCP Server (FastMCP + HTTP + OAuth 2.1)");
   console.log(`   Node version: ${process.version}`);
   console.log(`   PID: ${process.pid}`);
+  console.log(`   Debug mode: ${isDebug() ? "✓ enabled" : "disabled"}`);
+
+  // Install fetch interceptor early to capture all HTTP requests (including OAuth)
+  installFetchInterceptor();
 
   let config: ServerConfig;
   try {
@@ -652,6 +832,54 @@ async function main() {
   );
   if (config.openaiBaseUrl) {
     console.log(`   OpenAI Base URL: ${config.openaiBaseUrl}`);
+  }
+
+  // Debug mode: show OAuth configuration and test connectivity
+  if (isDebug()) {
+    console.log("\n   [DEBUG] OAuth Configuration:");
+    console.log(
+      `   [DEBUG]   Authorization endpoint: https://${config.sentryHost}/oauth/authorize/`,
+    );
+    console.log(
+      `   [DEBUG]   Token endpoint: https://${config.sentryHost}/oauth/token/`,
+    );
+    console.log(
+      `   [DEBUG]   Client ID: ${config.sentryClientId.substring(0, 16)}...`,
+    );
+    console.log(`   [DEBUG]   Scopes: ${config.sentryScopes.join(", ")}`);
+    console.log(
+      `   [DEBUG]   Allowed redirect patterns: ${config.allowedRedirectUriPatterns.join(", ")}`,
+    );
+
+    // Test connectivity to Sentry OAuth endpoints
+    console.log("\n   [DEBUG] Testing Sentry connectivity...");
+    const testEndpoints = [
+      `https://${config.sentryHost}/oauth/authorize/`,
+      `https://${config.sentryHost}/oauth/token/`,
+      `https://${config.sentryHost}/api/0/`,
+    ];
+
+    for (const url of testEndpoints) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(url, {
+          method: "HEAD",
+          signal: controller.signal,
+        }).catch(() => null);
+        clearTimeout(timeout);
+
+        if (response) {
+          console.log(`   [DEBUG]   ${url} => ${response.status}`);
+        } else {
+          console.log(`   [DEBUG]   ${url} => connection failed`);
+        }
+      } catch (err) {
+        console.log(
+          `   [DEBUG]   ${url} => error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 
   // Configure OpenAI base URL for embedded agents (must be set explicitly, not via env var)
