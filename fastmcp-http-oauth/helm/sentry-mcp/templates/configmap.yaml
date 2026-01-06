@@ -35,4 +35,7 @@ data:
   {{- if .Values.config.allowedRedirectUriPatterns }}
   ALLOWED_REDIRECT_URI_PATTERNS: {{ .Values.config.allowedRedirectUriPatterns | quote }}
   {{- end }}
+  {{- if .Values.config.statelessMode }}
+  STATELESS_MODE: {{ .Values.config.statelessMode | quote }}
+  {{- end }}
 {{- end }}

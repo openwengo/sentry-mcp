@@ -149,6 +149,11 @@ config:
   # Default: * (allow all)
   allowedRedirectUriPatterns: ""
 
+  # Stateless mode for distributed/load-balanced deployments
+  # When true, server doesn't maintain session state between requests
+  # Default: false (stateful mode)
+  statelessMode: "false"
+
 # =============================================================================
 # Secrets
 # =============================================================================

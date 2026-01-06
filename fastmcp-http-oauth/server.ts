@@ -155,6 +155,11 @@ interface ServerConfig {
   // OAuth redirect URI patterns (comma-separated, supports wildcards)
   // Default: "*" (allows any redirect URI - restrict in production!)
   allowedRedirectUriPatterns: string[];
+
+  // Stateless mode for distributed/load-balanced deployments
+  // When true, server doesn't maintain session state between requests
+  // Default: false (stateful mode)
+  statelessMode: boolean;
 }
 
 function loadConfig(): ServerConfig {
@@ -222,6 +227,8 @@ function loadConfig(): ServerConfig {
           p.trim(),
         )
       : ["*"], // Default allows all - should be restricted in production
+    // Stateless mode (default: false for stateful mode)
+    statelessMode: parseBoolean(process.env.STATELESS_MODE, false),
   };
 }
 
@@ -638,6 +645,9 @@ async function main() {
   console.log(`   Sentry Host: ${config.sentryHost}`);
   console.log(`   Redis: ${config.redisUrl}${config.redisTls ? " (TLS)" : ""}`);
   console.log(
+    `   Mode: ${config.statelessMode ? "stateless (distributed)" : "stateful (single instance)"}`,
+  );
+  console.log(
     `   OpenAI API: ${config.openaiApiKey ? "✓ configured" : "⚠️  not configured (AI tools disabled)"}`,
   );
   if (config.openaiBaseUrl) {
@@ -684,7 +694,7 @@ async function main() {
         port: config.port,
         host: config.host || "0.0.0.0", // Bind to all interfaces (0.0.0.0) for Docker
         endpoint: "/mcp",
-        stateless: true, // Required for distributed/load-balanced deployments
+        stateless: config.statelessMode,
       },
     });
   } catch (err) {

@@ -35,6 +35,9 @@ services:
 
       # Logging (set to "debug" for verbose output)
       LOG_LEVEL: "${LOG_LEVEL:-}"
+
+      # Stateless mode (set to "true" for distributed/load-balanced deployments)
+      STATELESS_MODE: "${STATELESS_MODE:-false}"
     depends_on:
       valkey:
         condition: service_healthy
