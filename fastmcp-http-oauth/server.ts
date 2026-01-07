@@ -504,7 +504,7 @@ interface AuthenticateRequest {
  * Context passed to tool execute callback
  */
 interface ToolExecuteContext {
-  session: SentrySession | undefined;
+  session: AuthResult | undefined;
 }
 
 /**
@@ -524,6 +524,18 @@ interface SentrySession {
   /** Sentry host */
   sentryHost: string;
 }
+
+interface AuthFailure {
+  /** Index signature for FastMCPSessionAuth compatibility */
+  [key: string]: unknown;
+  authenticated: false;
+  error: string;
+}
+
+type AuthResult = SentrySession | AuthFailure;
+
+const isAuthFailure = (session: AuthResult): session is AuthFailure =>
+  "authenticated" in session && session.authenticated === false;
 
 // ============================================================================
 // Tool Registration Helper
@@ -592,7 +604,7 @@ async function createServer(config: ServerConfig) {
 
   // Create FastMCP server with custom logger
   const logger = createLogger();
-  const server = new FastMCP<SentrySession>({
+  const server = new FastMCP<AuthResult>({
     name: "sentry-mcp",
     version: "1.0.0",
     logger, // Custom logger to filter noisy warnings
@@ -615,13 +627,13 @@ async function createServer(config: ServerConfig) {
     },
 
     // Authentication - extract session from JWT
-    authenticate: async (request: AuthenticateRequest) => {
-      debugLog("Auth", "authenticate() called");
-
+    authenticate: async (request: AuthenticateRequest): Promise<AuthResult> => {
       const authHeader = request.headers.authorization;
       if (!authHeader?.startsWith("Bearer ")) {
-        debugLog("Auth", "Missing or invalid Authorization header");
-        throw new Error("Missing or invalid Authorization header");
+        const errorMessage =
+          "Unauthorized: Missing or invalid Authorization header";
+        console.warn(errorMessage);
+        return { authenticated: false, error: errorMessage };
       }
 
       const token = authHeader.slice(7);
@@ -640,8 +652,9 @@ async function createServer(config: ServerConfig) {
       }
 
       if (!upstreamTokens) {
-        debugLog("Auth", "No upstream tokens found (invalid/expired)");
-        throw new Error("Invalid or expired token");
+        const errorMessage = "Unauthorized: Invalid or expired token";
+        console.warn(errorMessage);
+        return { authenticated: false, error: errorMessage };
       }
       debugLog("Auth", "Upstream tokens loaded successfully");
 
@@ -650,7 +663,9 @@ async function createServer(config: ServerConfig) {
       try {
         const parts = token.split(".");
         if (parts.length < 2 || !parts[1]) {
-          throw new Error("Token missing payload segment");
+          const errorMessage = "Unauthorized: Invalid token payload";
+          console.warn(errorMessage);
+          return { authenticated: false, error: errorMessage };
         }
         payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
         debugLog("Auth", "JWT payload parsed:", {
@@ -658,10 +673,11 @@ async function createServer(config: ServerConfig) {
           client_id: payload.client_id,
         });
       } catch (err) {
-        debugLog("Auth", "JWT parse error:", err);
-        throw new Error(
-          `Failed to parse token payload: ${err instanceof Error ? err.message : "invalid format"}`,
+        const errorMessage = "Unauthorized: Invalid token payload";
+        console.warn(
+          `${errorMessage} (${err instanceof Error ? err.message : "invalid format"})`,
         );
+        return { authenticated: false, error: errorMessage };
       }
 
       // Normalize scopes to array (OAuth 2.0/2.1 may return space-separated string)
@@ -741,7 +757,7 @@ async function createServer(config: ServerConfig) {
           context: ToolExecuteContext,
         ) => {
           const session = context.session;
-          if (!session) {
+          if (!session || isAuthFailure(session)) {
             throw new Error("Not authenticated");
           }
 
